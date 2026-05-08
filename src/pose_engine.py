@@ -8,10 +8,15 @@ import os
 class PoseEngine:
     def __init__(self):
         # Initialize MediaPipe Tasks Pose Landmarker
-        model_path = 'pose_landmarker.task'
+        # Get the directory of the current script
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(current_dir, '..', 'models', 'pose_landmarker.task')
+        
         if not os.path.exists(model_path):
-            # This will be handled in main.py, but for now we define the path
-            pass
+            # Fallback for root execution
+            model_path = os.path.join(current_dir, 'models', 'pose_landmarker.task')
+            if not os.path.exists(model_path):
+                model_path = 'pose_landmarker.task'
             
         base_options = python.BaseOptions(model_asset_path=model_path)
         options = vision.PoseLandmarkerOptions(
@@ -169,7 +174,6 @@ class PoseEngine:
         if is_side:
             # --- SIDE VIEW LOGIC (Calculates Body Depth) ---
             # For side poses, the distance between the boundaries represents the depth of the body.
-            # We use the same exact anatomical proportions to ensure accuracy.
             
             # 1. Exact Chest Depth (~25% down the torso from shoulders)
             chest_y = int(shoulder_y + 0.25 * (hip_y - shoulder_y))
@@ -216,6 +220,8 @@ class PoseEngine:
         res_downscaled["hip_boundary_right"] = best_hip_r
 
         res_downscaled["view_type"] = "side" if is_side else "front"
+
+
 
         # Scale everything back UP to original coordinates
         keypoints_dict = {}
