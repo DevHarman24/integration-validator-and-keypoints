@@ -13,4 +13,4 @@ ENV/
 *.zip
 system_extracted/
 team_structure_extracted/
-data/coco_eval/
+data/
