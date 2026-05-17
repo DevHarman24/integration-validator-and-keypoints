@@ -100,9 +100,10 @@ class PoseEngine:
         closest_idx = np.argmin([min(abs(s - center_x), abs(e - center_x)) for s, e in zip(starts, ends)])
         return int(starts[closest_idx]), int(ends[closest_idx])
 
-    def get_keypoints(self, image_path):
+    def get_keypoints(self, image_path, skip_boundaries=False):
         """
         Processes an image and returns key body landmarks and visual boundaries.
+        Set skip_boundaries=True to bypass GrabCut for faster skeleton evaluation.
         """
         if not os.path.exists(image_path):
             return "Error: File not found."
@@ -151,18 +152,25 @@ class PoseEngine:
         }
 
         # Detect if it's a side view or front view
-        shoulder_dist = abs(landmarks[11].x - landmarks[12].x)
-        is_side = shoulder_dist < 0.12
+        # Robust view detection using Shoulder-Width to Torso-Height ratio
+        # In front view, shoulders are ~40-50% of torso height. In side view, they are very narrow.
+        shoulder_dist_norm = abs(landmarks[11].x - landmarks[12].x)
+        torso_height_norm = abs(landmarks[11].y - landmarks[23].y)
+        is_side = (shoulder_dist_norm / max(torso_height_norm, 0.01)) < 0.35
         center_x = int((temp_joints["hip_left"][0] + temp_joints["hip_right"][0] + 
                         temp_joints["shoulder_left"][0] + temp_joints["shoulder_right"][0]) / 4)
 
-        # Generate mask using GrabCut
-        person_mask = self.get_person_mask_grabcut(image_cv, landmarks, h, w)
+        # Generate mask using GrabCut (unless skipped)
+        person_mask = None
+        if not skip_boundaries:
+            person_mask = self.get_person_mask_grabcut(image_cv, landmarks, h, w)
 
         # Result dictionary (using downscaled coords temporarily)
         res_downscaled = {
             "shoulder_left": temp_joints["shoulder_left"],
             "shoulder_right": temp_joints["shoulder_right"],
+            "hip_left": temp_joints["hip_left"],
+            "hip_right": temp_joints["hip_right"],
             "knee_left": temp_joints["knee_left"],
             "knee_right": temp_joints["knee_right"]
         }
@@ -171,45 +179,51 @@ class PoseEngine:
         shoulder_y = int((temp_joints["shoulder_left"][1] + temp_joints["shoulder_right"][1]) / 2)
         hip_y = int((temp_joints["hip_left"][1] + temp_joints["hip_right"][1]) / 2)
 
-        if is_side:
-            # --- SIDE VIEW LOGIC (Calculates Body Depth) ---
-            # For side poses, the distance between the boundaries represents the depth of the body.
-            
-            # 1. Exact Chest Depth (~25% down the torso from shoulders)
-            chest_y = int(shoulder_y + 0.25 * (hip_y - shoulder_y))
-            c_l, c_r = self.get_visual_boundary(person_mask, chest_y, center_x)
-            best_chest_l = [c_l, chest_y] if c_l is not None else None
-            best_chest_r = [c_r, chest_y] if c_r is not None else None
+        # Initialize boundaries as None
+        best_chest_l = best_chest_r = None
+        best_waist_l = best_waist_r = None
+        best_hip_l = best_hip_r = None
 
-            # 2. Exact Waist Depth (~58% down the torso from shoulders, pose-agnostic)
-            waist_y = int(shoulder_y + 0.58 * (hip_y - shoulder_y))
-            w_l, w_r = self.get_visual_boundary(person_mask, waist_y, center_x)
-            best_waist_l = [w_l, waist_y] if w_l is not None else None
-            best_waist_r = [w_r, waist_y] if w_r is not None else None
-
-            # 3. Exact Hip Depth (at the hip joint level)
-            h_l, h_r = self.get_visual_boundary(person_mask, hip_y, center_x)
-            best_hip_l = [h_l, hip_y] if h_l is not None else None
-            best_hip_r = [h_r, hip_y] if h_r is not None else None
-        else:
-            # --- FRONT VIEW LOGIC (Calculates Body Width) ---
-            
-            # 1. Exact Chest Calculation (~25% down the torso from shoulders)
-            chest_y = int(shoulder_y + 0.25 * (hip_y - shoulder_y))
-            c_l, c_r = self.get_visual_boundary(person_mask, chest_y, center_x)
-            best_chest_l = [c_l, chest_y] if c_l is not None else None
-            best_chest_r = [c_r, chest_y] if c_r is not None else None
-
-            # 2. Exact Waist Calculation (~60% down the torso from shoulders, pose-agnostic)
-            waist_y = int(shoulder_y + 0.60 * (hip_y - shoulder_y))
-            w_l, w_r = self.get_visual_boundary(person_mask, waist_y, center_x)
-            best_waist_l = [w_l, waist_y] if w_l is not None else None
-            best_waist_r = [w_r, waist_y] if w_r is not None else None
-
-            # 3. Exact Hip Calculation (at the hip joint level)
-            h_l, h_r = self.get_visual_boundary(person_mask, hip_y, center_x)
-            best_hip_l = [h_l, hip_y] if h_l is not None else None
-            best_hip_r = [h_r, hip_y] if h_r is not None else None
+        if not skip_boundaries and person_mask is not None:
+            if is_side:
+                # --- SIDE VIEW LOGIC (Calculates Body Depth) ---
+                # For side poses, the distance between the boundaries represents the depth of the body.
+                
+                # 1. Exact Chest Depth (~25% down the torso from shoulders)
+                chest_y = int(shoulder_y + 0.25 * (hip_y - shoulder_y))
+                c_l, c_r = self.get_visual_boundary(person_mask, chest_y, center_x)
+                best_chest_l = [c_l, chest_y] if c_l is not None else None
+                best_chest_r = [c_r, chest_y] if c_r is not None else None
+    
+                # 2. Exact Waist Depth (~58% down the torso from shoulders, pose-agnostic)
+                waist_y = int(shoulder_y + 0.58 * (hip_y - shoulder_y))
+                w_l, w_r = self.get_visual_boundary(person_mask, waist_y, center_x)
+                best_waist_l = [w_l, waist_y] if w_l is not None else None
+                best_waist_r = [w_r, waist_y] if w_r is not None else None
+    
+                # 3. Exact Hip Depth (at the hip joint level)
+                h_l, h_r = self.get_visual_boundary(person_mask, hip_y, center_x)
+                best_hip_l = [h_l, hip_y] if h_l is not None else None
+                best_hip_r = [h_r, hip_y] if h_r is not None else None
+            else:
+                # --- FRONT VIEW LOGIC (Calculates Body Width) ---
+                
+                # 1. Exact Chest Calculation (~25% down the torso from shoulders)
+                chest_y = int(shoulder_y + 0.25 * (hip_y - shoulder_y))
+                c_l, c_r = self.get_visual_boundary(person_mask, chest_y, center_x)
+                best_chest_l = [c_l, chest_y] if c_l is not None else None
+                best_chest_r = [c_r, chest_y] if c_r is not None else None
+    
+                # 2. Exact Waist Calculation (~60% down the torso from shoulders, pose-agnostic)
+                waist_y = int(shoulder_y + 0.60 * (hip_y - shoulder_y))
+                w_l, w_r = self.get_visual_boundary(person_mask, waist_y, center_x)
+                best_waist_l = [w_l, waist_y] if w_l is not None else None
+                best_waist_r = [w_r, waist_y] if w_r is not None else None
+    
+                # 3. Exact Hip Calculation (at the hip joint level)
+                h_l, h_r = self.get_visual_boundary(person_mask, hip_y, center_x)
+                best_hip_l = [h_l, hip_y] if h_l is not None else None
+                best_hip_r = [h_r, hip_y] if h_r is not None else None
 
         # Add calculated boundaries
         res_downscaled["chest_boundary_left"] = best_chest_l

@@ -1,4 +1,5 @@
 from pose_engine import PoseEngine
+from validator import HumanPoseValidator
 import json
 import os
 
@@ -6,6 +7,7 @@ import sys
 
 def main():
     engine = PoseEngine()
+    validator = HumanPoseValidator()
     
     # Check if images were passed as arguments
     if len(sys.argv) > 1:
@@ -26,7 +28,22 @@ def main():
     for img_path in images_to_process:
         if os.path.exists(img_path):
             img_name = os.path.basename(img_path)
-            print(f"Processing {img_name}...")
+            print(f"\nProcessing {img_name}...")
+            
+            # 1. Validation Step
+            print("  [>] Running validation...")
+            val_report = validator.validate_pose(img_path, expected_view="auto")
+            
+            if not val_report.get("valid", False):
+                print(f"  [!] Validation failed for {img_name}:")
+                for err in val_report.get("errors", []):
+                    print(f"      - {err}")
+                print("  [!] Skipping keypoint generation due to validation failure.")
+                continue
+                
+            print(f"  [+] Validation passed ({val_report['view']} view detected).")
+            
+            # 2. Keypoint Generation
             keypoints = engine.get_keypoints(img_path)
             
             if isinstance(keypoints, str):
