@@ -24,7 +24,7 @@ class PoseEngine:
             output_segmentation_masks=False)
         self.detector = vision.PoseLandmarker.create_from_options(options)
 
-    def get_person_mask_grabcut(self, image, landmarks, h, w):
+    def get_person_mask_grabcut(self, image, landmarks, h, w, is_side=False):
         """
         Generates a person mask using a two-pass GrabCut approach.
         """
@@ -61,11 +61,12 @@ class PoseEngine:
         cv2.line(mask, spine_top, spine_bottom, cv2.GC_FGD, 10)
         
         # Arms (Definite Background) to ensure they are separated from torso
-        arm_landmarks = [[11, 13, 15], [12, 14, 16]]
-        for indices in arm_landmarks:
-            pts = [[int(landmarks[i].x * w), int(landmarks[i].y * h)] for i in indices]
-            for i in range(len(pts)-1):
-                cv2.line(mask, tuple(pts[i]), tuple(pts[i+1]), cv2.GC_BGD, 40)
+        if not is_side:
+            arm_landmarks = [[11, 13, 15], [12, 14, 16]]
+            for indices in arm_landmarks:
+                pts = [[int(landmarks[i].x * w), int(landmarks[i].y * h)] for i in indices]
+                for i in range(len(pts)-1):
+                    cv2.line(mask, tuple(pts[i]), tuple(pts[i+1]), cv2.GC_BGD, 40)
 
         try:
             cv2.grabCut(image, mask, rect, bgdModel, fgdModel, 3, cv2.GC_INIT_WITH_MASK)
@@ -163,7 +164,7 @@ class PoseEngine:
         # Generate mask using GrabCut (unless skipped)
         person_mask = None
         if not skip_boundaries:
-            person_mask = self.get_person_mask_grabcut(image_cv, landmarks, h, w)
+            person_mask = self.get_person_mask_grabcut(image_cv, landmarks, h, w, is_side)
 
         # Result dictionary (using downscaled coords temporarily)
         res_downscaled = {
@@ -195,8 +196,8 @@ class PoseEngine:
                 best_chest_l = [c_l, chest_y] if c_l is not None else None
                 best_chest_r = [c_r, chest_y] if c_r is not None else None
     
-                # 2. Exact Waist Depth (~58% down the torso from shoulders, pose-agnostic)
-                waist_y = int(shoulder_y + 0.58 * (hip_y - shoulder_y))
+                # 2. Exact Waist Depth (~65% down the torso from shoulders, pose-agnostic)
+                waist_y = int(shoulder_y + 0.65 * (hip_y - shoulder_y))
                 w_l, w_r = self.get_visual_boundary(person_mask, waist_y, center_x)
                 best_waist_l = [w_l, waist_y] if w_l is not None else None
                 best_waist_r = [w_r, waist_y] if w_r is not None else None
@@ -214,8 +215,8 @@ class PoseEngine:
                 best_chest_l = [c_l, chest_y] if c_l is not None else None
                 best_chest_r = [c_r, chest_y] if c_r is not None else None
     
-                # 2. Exact Waist Calculation (~60% down the torso from shoulders, pose-agnostic)
-                waist_y = int(shoulder_y + 0.60 * (hip_y - shoulder_y))
+                # 2. Exact Waist Calculation (~65% down the torso from shoulders, pose-agnostic)
+                waist_y = int(shoulder_y + 0.65 * (hip_y - shoulder_y))
                 w_l, w_r = self.get_visual_boundary(person_mask, waist_y, center_x)
                 best_waist_l = [w_l, waist_y] if w_l is not None else None
                 best_waist_r = [w_r, waist_y] if w_r is not None else None
