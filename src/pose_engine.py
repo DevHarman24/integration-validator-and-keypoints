@@ -21,39 +21,45 @@ class PoseEngine:
         base_options = python.BaseOptions(model_asset_path=model_path)
         options = vision.PoseLandmarkerOptions(
             base_options=base_options,
-            output_segmentation_masks=False)
+            output_segmentation_masks=True)
         self.detector = vision.PoseLandmarker.create_from_options(options)
 
-    def get_person_mask_grabcut(self, image, landmarks, h, w):
+    def get_person_mask_grabcut(self, image, landmarks, h, w, is_side=False, mp_mask=None):
         """
-        Generates a person mask using a two-pass GrabCut approach.
+        Generates a person mask using a two-pass GrabCut approach, optionally initialized with MediaPipe mask.
         """
         mask = np.zeros(image.shape[:2], np.uint8)
-        
-        # 1. Define Bounding Box for the person
-        xs = [int(l.x * w) for l in landmarks]
-        ys = [int(l.y * h) for l in landmarks]
-        rect = (max(0, min(xs) - 60), max(0, min(ys) - 60), 
-                min(w-1, max(xs) + 60) - max(0, min(xs) - 60), 
-                min(h-1, max(ys) + 40) - max(0, min(ys) - 60))
         
         bgdModel = np.zeros((1, 65), np.float64)
         fgdModel = np.zeros((1, 65), np.float64)
         
-        # Pass 1: Initialize with Rectangle
-        try:
-            cv2.grabCut(image, mask, rect, bgdModel, fgdModel, 3, cv2.GC_INIT_WITH_RECT)
-        except:
-            pass
+        rect = None
+        if mp_mask is not None:
+            # Initialize with MediaPipe's highly accurate mask
+            mask[mp_mask > 0.5] = cv2.GC_PR_FGD
+            mask[mp_mask <= 0.5] = cv2.GC_BGD
+        else:
+            # 1. Define Bounding Box for the person
+            xs = [int(l.x * w) for l in landmarks]
+            ys = [int(l.y * h) for l in landmarks]
+            rect = (max(0, min(xs) - 60), max(0, min(ys) - 60), 
+                    min(w-1, max(xs) + 60) - max(0, min(xs) - 60), 
+                    min(h-1, max(ys) + 40) - max(0, min(ys) - 60))
+            
+            # Pass 1: Initialize with Rectangle
+            try:
+                cv2.grabCut(image, mask, rect, bgdModel, fgdModel, 3, cv2.GC_INIT_WITH_RECT)
+            except:
+                pass
             
         # Pass 2: Refine with Skeleton Guidance and Arm Masking
-        # Torso Polygon (Probably Foreground)
+        # Torso Polygon (Definite Foreground)
         sh_l = [int(landmarks[11].x * w), int(landmarks[11].y * h)]
         sh_r = [int(landmarks[12].x * w), int(landmarks[12].y * h)]
         hip_l = [int(landmarks[23].x * w), int(landmarks[23].y * h)]
         hip_r = [int(landmarks[24].x * w), int(landmarks[24].y * h)]
         torso_pts = np.array([sh_l, sh_r, hip_r, hip_l], np.int32)
-        cv2.fillPoly(mask, [torso_pts], cv2.GC_PR_FGD)
+        cv2.fillPoly(mask, [torso_pts], cv2.GC_FGD)
         
         # Spine (Definite Foreground)
         spine_top = ((sh_l[0]+sh_r[0])//2, (sh_l[1]+sh_r[1])//2)
@@ -61,14 +67,17 @@ class PoseEngine:
         cv2.line(mask, spine_top, spine_bottom, cv2.GC_FGD, 10)
         
         # Arms (Definite Background) to ensure they are separated from torso
-        arm_landmarks = [[11, 13, 15], [12, 14, 16]]
-        for indices in arm_landmarks:
-            pts = [[int(landmarks[i].x * w), int(landmarks[i].y * h)] for i in indices]
-            for i in range(len(pts)-1):
-                cv2.line(mask, tuple(pts[i]), tuple(pts[i+1]), cv2.GC_BGD, 40)
+        # Only do this for front view. For side view, arms overlap torso and we need full depth.
+        if not is_side:
+            arm_landmarks = [[11, 13, 15], [12, 14, 16]]
+            for indices in arm_landmarks:
+                pts = [[int(landmarks[i].x * w), int(landmarks[i].y * h)] for i in indices]
+                for i in range(len(pts)-1):
+                    cv2.line(mask, tuple(pts[i]), tuple(pts[i+1]), cv2.GC_BGD, 40)
 
         try:
-            cv2.grabCut(image, mask, rect, bgdModel, fgdModel, 3, cv2.GC_INIT_WITH_MASK)
+            mode = cv2.GC_INIT_WITH_MASK
+            cv2.grabCut(image, mask, None, bgdModel, fgdModel, 3, mode)
         except:
             pass
             
@@ -160,10 +169,20 @@ class PoseEngine:
         center_x = int((temp_joints["hip_left"][0] + temp_joints["hip_right"][0] + 
                         temp_joints["shoulder_left"][0] + temp_joints["shoulder_right"][0]) / 4)
 
+        mp_mask = None
+        if detection_result.segmentation_masks:
+            mp_mask = detection_result.segmentation_masks[0].numpy_view()
+            if len(mp_mask.shape) > 2:
+                mp_mask = np.squeeze(mp_mask)
+
         # Generate mask using GrabCut (unless skipped)
         person_mask = None
         if not skip_boundaries:
-            person_mask = self.get_person_mask_grabcut(image_cv, landmarks, h, w)
+            if is_side and mp_mask is not None:
+                # For side view, use the highly accurate MediaPipe mask directly to prevent background bleeding
+                person_mask = (mp_mask > 0.5).astype(np.uint8)
+            else:
+                person_mask = self.get_person_mask_grabcut(image_cv, landmarks, h, w, is_side, mp_mask)
 
         # Result dictionary (using downscaled coords temporarily)
         res_downscaled = {

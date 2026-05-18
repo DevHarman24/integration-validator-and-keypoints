@@ -68,11 +68,11 @@ def process_image_pair(front_path, side_path, engine, validator, height_cm, outp
     hip_y        = (hip_left[1] + hip_right[1]) / 2
     torso_px     = abs(hip_y - shoulder_y)
 
-    # Estimate top of head (torso is ~32% of full height, head adds ~13%)
-    top_head = [int(shoulder_x), int(shoulder_y - torso_px * 0.40)]
+    # Estimate top of head (torso is ~32% of full height, head adds ~16%)
+    top_head = [int(shoulder_x), int(shoulder_y - torso_px * 0.50)]
 
-    # Estimate heel (legs are ~47% of full height below hip)
-    heel     = [int(shoulder_x), int(hip_y + torso_px * 1.47)]
+    # Estimate heel (legs are ~52% of full height below hip)
+    heel     = [int(shoulder_x), int(hip_y + torso_px * 1.625)]
 
     # Front keypoints for measurement_engineer
     front_for_measurement = {
@@ -82,12 +82,18 @@ def process_image_pair(front_path, side_path, engine, validator, height_cm, outp
         "right_shoulder" : sh_right,
         "left_hip"       : hip_left,
         "right_hip"      : hip_right,
+        "chest_left"     : front_kp.get('chest_boundary_left'),
+        "chest_right"    : front_kp.get('chest_boundary_right'),
+        "waist_left"     : front_kp.get('waist_boundary_left'),
+        "waist_right"    : front_kp.get('waist_boundary_right'),
     }
 
-    # Side keypoints — use chest and hip boundary points from side image
+    # Side keypoints — use chest, waist, and hip boundary points from side image
     # pose_engine boundary points on side image = front-to-back depth
     chest_bl = side_kp.get('chest_boundary_left')
     chest_br = side_kp.get('chest_boundary_right')
+    waist_bl = side_kp.get('waist_boundary_left')
+    waist_br = side_kp.get('waist_boundary_right')
     hip_bl   = side_kp.get('hip_boundary_left')
     hip_br   = side_kp.get('hip_boundary_right')
 
@@ -104,6 +110,10 @@ def process_image_pair(front_path, side_path, engine, validator, height_cm, outp
         hip_bl = side_kp.get('hip_left')
         hip_br = side_kp.get('hip_right')
 
+    if waist_bl is None or waist_br is None:
+        print("  [!] Waist boundary not found in side image.")
+        # No direct joint fallback for waist from side
+
     if not all([chest_bl, chest_br, hip_bl, hip_br]):
         print("  [!] Missing side image boundary points — cannot calculate depth")
         return
@@ -111,6 +121,8 @@ def process_image_pair(front_path, side_path, engine, validator, height_cm, outp
     side_for_measurement = {
         "chest_front" : chest_bl,
         "chest_back"  : chest_br,
+        "waist_front" : waist_bl,
+        "waist_back"  : waist_br,
         "hip_front"   : hip_bl,
         "hip_back"    : hip_br,
     }
@@ -123,12 +135,12 @@ def process_image_pair(front_path, side_path, engine, validator, height_cm, outp
             side_keypoints  = side_for_measurement,
             real_height_cm  = height_cm
         )
-        print(f"\n  ╔══════════════════════════════════╗")
-        print(f"  ║       BODY MEASUREMENTS          ║")
-        print(f"  ╠══════════════════════════════════╣")
+        print(f"\n  +----------------------------------+")
+        print(f"  |       BODY MEASUREMENTS          |")
+        print(f"  +----------------------------------+")
         for key, val in results.items():
-            print(f"  ║  {key:<18} : {val} cm")
-        print(f"  ╚══════════════════════════════════╝")
+            print(f"  |  {key:<18} : {val} cm")
+        print(f"  +----------------------------------+")
     except Exception as e:
         print(f"  [!] Measurement error: {e}")
         return
@@ -204,7 +216,7 @@ def main():
         engine, validator, height_cm, output_dir
     )
 
-    print("\n[✓] Done.")
+    print("\n[OK] Done.")
 
 if __name__ == "__main__":
     main()
