@@ -23,8 +23,9 @@ import math
 import argparse
 import zipfile
 import time
+import shutil
+import cv2
 
-# Patch sys.path so we can import PoseEngine from the same src/ folder
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
@@ -39,10 +40,6 @@ ANNO_PATH    = os.path.join(COCO_DIR, "annotations", "person_keypoints_val2017.j
 IMAGES_URL = "http://images.cocodataset.org/zips/val2017.zip"
 ANNOT_URL  = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
 
-# COCO joint index -> engine key mapping
-#   5 = left_shoulder   6 = right_shoulder
-#   11 = left_hip       12 = right_hip
-#   13 = left_knee      14 = right_knee
 JOINT_MAP = {
     "shoulder_left" : 5,
     "shoulder_right": 6,
@@ -73,9 +70,9 @@ def download_file(url, dest):
     r = requests.get(url, stream=True, timeout=60)
     r.raise_for_status()
 
-    total = int(r.headers.get("content-length", 0))
+    total      = int(r.headers.get("content-length", 0))
     downloaded = 0
-    chunk_size = 1024 * 1024  # 1 MB chunks
+    chunk_size = 1024 * 1024
 
     with open(dest, "wb") as f:
         for chunk in r.iter_content(chunk_size=chunk_size):
@@ -83,11 +80,13 @@ def download_file(url, dest):
                 f.write(chunk)
                 downloaded += len(chunk)
                 if total:
-                    pct = downloaded / total * 100
+                    pct  = downloaded / total * 100
                     done = int(pct / 2)
-                    bar = "#" * done + "-" * (50 - done)
+                    bar  = "#" * done + "-" * (50 - done)
                     sys.stdout.write("\r  [%s] %5.1f%%  %dMB/%dMB" % (
-                        bar, pct, downloaded // 1024 // 1024, total // 1024 // 1024))
+                        bar, pct,
+                        downloaded // 1024 // 1024,
+                        total // 1024 // 1024))
                     sys.stdout.flush()
     print("")
 
@@ -127,7 +126,7 @@ def ensure_coco_data(skip_download=False):
 
 
 # =============================================================================
-#   COCO ANNOTATION LOADER  (pure JSON, no pycocotools needed)
+#   COCO ANNOTATION LOADER
 # =============================================================================
 
 def load_coco_annotations(max_images):
@@ -150,7 +149,7 @@ def load_coco_annotations(max_images):
         if len(anns) != 1:
             continue
 
-        ann = anns[0]
+        ann      = anns[0]
         img_info = img_map.get(image_id)
         if img_info is None:
             continue
@@ -159,9 +158,10 @@ def load_coco_annotations(max_images):
         if bbox[3] < 100:
             continue
 
-        kps_flat = ann["keypoints"]
+        kps_flat  = ann["keypoints"]
         gt_joints = {}
-        valid = True
+        valid     = True
+
         for joint_name, coco_idx in JOINT_MAP.items():
             x = kps_flat[coco_idx * 3]
             y = kps_flat[coco_idx * 3 + 1]
@@ -175,10 +175,10 @@ def load_coco_annotations(max_images):
             continue
 
         results.append({
-            "image_id": image_id,
+            "image_id" : image_id,
             "file_name": img_info["file_name"],
-            "width": img_info["width"],
-            "height": img_info["height"],
+            "width"    : img_info["width"],
+            "height"   : img_info["height"],
             "gt_joints": gt_joints,
         })
 
@@ -187,6 +187,60 @@ def load_coco_annotations(max_images):
 
     print("  Found %d usable images (single-person, all 6 joints visible)." % len(results))
     return results
+
+
+# =============================================================================
+#   IMAGE CHANNEL CHECK
+# =============================================================================
+
+def needs_conversion(img_path):
+    """
+    Returns True if image has wrong number of channels.
+    Does NOT load full image — just checks header via imread flags.
+    """
+    img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None  # unreadable
+
+    if len(img.shape) == 2:
+        return "gray"  # grayscale
+
+    if img.shape[2] == 4:
+        return "rgba"  # 4-channel
+
+    return False  # already 3-channel, no conversion needed
+
+
+def fix_and_overwrite(img_path):
+    """
+    Converts image to 3-channel BGR and overwrites the original.
+    Keeps a backup as img_path + '.bak'.
+    Returns True on success, False on failure.
+    """
+    img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return False
+
+    if len(img.shape) == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    else:
+        return True  # nothing to fix
+
+    # Backup original
+    shutil.copy2(img_path, img_path + ".bak")
+
+    # Overwrite with fixed version
+    cv2.imwrite(img_path, img)
+    return True
+
+
+def restore_backup(img_path):
+    """Restore original file from backup if backup exists."""
+    bak = img_path + ".bak"
+    if os.path.exists(bak):
+        shutil.move(bak, img_path)
 
 
 # =============================================================================
@@ -205,27 +259,27 @@ def compute_metrics(errors_by_joint):
     for joint, errs in errors_by_joint.items():
         if not errs:
             continue
-        n    = len(errs)
-        mean = sum(errs) / n
+        n        = len(errs)
+        mean     = sum(errs) / n
         variance = sum((e - mean) ** 2 for e in errs) / n
-        std  = math.sqrt(variance)
+        std      = math.sqrt(variance)
 
         mean_err[joint] = mean
         std_err[joint]  = std
 
         for t in PCK_THRESHOLDS:
-            correct = sum(1 for e in errs if e <= t)
+            correct       = sum(1 for e in errs if e <= t)
             pck[t][joint] = correct / n * 100
 
     for t in PCK_THRESHOLDS:
-        vals = list(pck[t].values())
+        vals              = list(pck[t].values())
         pck[t]["overall"] = sum(vals) / len(vals) if vals else 0
 
     return pck, mean_err, std_err
 
 
 # =============================================================================
-#   REPORT GENERATION  (100% ASCII - safe on all Windows consoles)
+#   REPORT GENERATION
 # =============================================================================
 
 def save_report(pck, mean_err, std_err, n_images, n_failed, elapsed):
@@ -233,7 +287,7 @@ def save_report(pck, mean_err, std_err, n_images, n_failed, elapsed):
     report_path = os.path.join(EVAL_DIR, "report.txt")
 
     joints = list(JOINT_MAP.keys())
-    W = 65
+    W      = 65
 
     lines = []
     lines.append("=" * W)
@@ -241,17 +295,18 @@ def save_report(pck, mean_err, std_err, n_images, n_failed, elapsed):
     lines.append("=" * W)
     lines.append("  Dataset         : COCO 2017 Val (single-person, 6 joints visible)")
     lines.append("  Images evaluated: %d" % n_images)
-    lines.append("  Detection fails : %d  (%.1f%%)" % (n_failed, n_failed / max(n_images, 1) * 100))
+    lines.append("  Detection fails : %d  (%.1f%%)" % (
+        n_failed, n_failed / max(n_images, 1) * 100))
     lines.append("  Time taken      : %.1fs" % elapsed)
     lines.append("")
     lines.append("-" * W)
     lines.append("  ACCURACY  -  PCK (Percentage of Correct Keypoints)")
-    lines.append("  A joint is 'correct' if prediction is within threshold of GT")
+    lines.append("  A joint is correct if prediction is within threshold of GT")
     lines.append("-" * W)
 
     header = "  %-22s %10s %10s %10s" % ("Joint", "PCK@10px", "PCK@20px", "PCK@50px")
     lines.append(header)
-    lines.append("  " + "-" * 22 + " " + "-" * 10 + " " + "-" * 10 + " " + "-" * 10)
+    lines.append("  " + "-"*22 + " " + "-"*10 + " " + "-"*10 + " " + "-"*10)
 
     for joint in joints:
         row = "  %-22s" % joint
@@ -259,7 +314,7 @@ def save_report(pck, mean_err, std_err, n_images, n_failed, elapsed):
             row += " %9.1f%%" % pck[t].get(joint, 0)
         lines.append(row)
 
-    lines.append("  " + "-" * 22 + " " + "-" * 10 + " " + "-" * 10 + " " + "-" * 10)
+    lines.append("  " + "-"*22 + " " + "-"*10 + " " + "-"*10 + " " + "-"*10)
     overall_row = "  %-22s" % "OVERALL"
     for t in PCK_THRESHOLDS:
         overall_row += " %9.1f%%" % pck[t].get("overall", 0)
@@ -270,12 +325,13 @@ def save_report(pck, mean_err, std_err, n_images, n_failed, elapsed):
     lines.append("  PRECISION  -  Error Standard Deviation per Joint")
     lines.append("  Lower StdDev = More consistent / stable predictions")
     lines.append("-" * W)
-    lines.append("  %-22s %12s %12s %10s" % ("Joint", "Mean Error", "Std Dev (+-)", "Rating"))
-    lines.append("  " + "-" * 22 + " " + "-" * 12 + " " + "-" * 12 + " " + "-" * 10)
+    lines.append("  %-22s %12s %12s %10s" % (
+        "Joint", "Mean Error", "Std Dev (+-)", "Rating"))
+    lines.append("  " + "-"*22 + " " + "-"*12 + " " + "-"*12 + " " + "-"*10)
 
     for joint in joints:
         me = mean_err.get(joint, 0)
-        sd = std_err.get(joint, 0)
+        sd = std_err.get(joint,  0)
         if sd < 5:
             rating = "Excellent"
         elif sd < 15:
@@ -321,7 +377,8 @@ def save_csv(rows, header):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate PoseEngine accuracy & precision against COCO.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate PoseEngine accuracy & precision against COCO.")
     parser.add_argument("--max-images",    type=int, default=300,
                         help="Max COCO images to evaluate (default: 300)")
     parser.add_argument("--skip-download", action="store_true",
@@ -343,48 +400,86 @@ def main():
         print("\n[ERROR] No usable COCO images found. Check the data directory.")
         sys.exit(1)
 
-    print("\n[3/4] Running PoseEngine on images ...")
+    print("\n[3/4] Running PoseEngine on %d images ..." % len(samples))
     from pose_engine import PoseEngine
     engine = PoseEngine()
 
-    joints = list(JOINT_MAP.keys())
+    joints          = list(JOINT_MAP.keys())
     errors_by_joint = {j: [] for j in joints}
-    csv_rows = []
-    csv_header = (["image_id", "file_name"] +
-                  [j + "_gt_x"    for j in joints] +
-                  [j + "_pred_x"  for j in joints] +
-                  [j + "_error_px" for j in joints] +
-                  ["detected"])
+    csv_rows        = []
+    csv_header      = (
+        ["image_id", "file_name"] +
+        [j + "_gt_x"     for j in joints] +
+        [j + "_pred_x"   for j in joints] +
+        [j + "_error_px" for j in joints] +
+        ["detected"]
+    )
 
-    n_failed = 0
-    t_start  = time.time()
+    n_failed  = 0
+    converted = []   # track which files we overwrote so we can restore
+    t_start   = time.time()
 
     for i, sample in enumerate(samples):
         img_path = os.path.join(IMAGES_DIR, sample["file_name"])
-        if not os.path.isfile(img_path):
-            n_failed += 1
-            continue
 
-        sys.stdout.write("\r  [%4d/%d]  %-40s" % (i + 1, len(samples), sample["file_name"][:40]))
+        sys.stdout.write("\r  [%4d/%d]  %-40s" % (
+            i + 1, len(samples), sample["file_name"][:40]))
         sys.stdout.flush()
 
+        # ── Helper: build a failed CSV row ────────────────────────
+        def failed_row(reason):
+            row = [sample["image_id"], sample["file_name"]]
+            for _ in joints: row.append("N/A")
+            for _ in joints: row.append("N/A")
+            for _ in joints: row.append("N/A")
+            row.append(reason)
+            return row
+
+        # ── Skip missing files ────────────────────────────────────
+        if not os.path.isfile(img_path):
+            n_failed += 1
+            csv_rows.append(failed_row("NO_FILE"))
+            continue
+
+        # ── Check and fix image channels ──────────────────────────
+        channel_status = needs_conversion(img_path)
+
+        if channel_status is None:
+            n_failed += 1
+            csv_rows.append(failed_row("UNREADABLE"))
+            continue
+
+        if channel_status:
+            # Overwrite image with 3-channel version
+            # pose_engine reads the path itself so we must fix the file on disk
+            ok = fix_and_overwrite(img_path)
+            if ok:
+                converted.append(img_path)
+            else:
+                n_failed += 1
+                csv_rows.append(failed_row("CONVERT_FAILED"))
+                continue
+
+        # ── Run engine ────────────────────────────────────────────
         result = engine.get_keypoints(img_path, skip_boundaries=True)
 
+        # Restore original file if we converted it
+        restore_backup(img_path)
+        if img_path in converted:
+            converted.remove(img_path)
+
+        # ── Pose not detected ─────────────────────────────────────
+        if isinstance(result, str):
+            n_failed += 1
+            csv_rows.append(failed_row("NO_POSE"))
+            continue
+
+        # ── Build CSV row ─────────────────────────────────────────
         row = [sample["image_id"], sample["file_name"]]
 
         for j in joints:
             gt = sample["gt_joints"][j]
             row.append(gt[0])
-
-        if isinstance(result, str):
-            n_failed += 1
-            for j in joints:
-                row.append("N/A")
-            for j in joints:
-                row.append("N/A")
-            row.append("NO")
-            csv_rows.append(row)
-            continue
 
         for j in joints:
             pred = result.get(j)
@@ -395,7 +490,6 @@ def main():
             pred = result.get(j)
             if pred is None:
                 row.append("N/A")
-                n_failed += 1
             else:
                 err = euclidean(pred, gt)
                 errors_by_joint[j].append(err)
@@ -406,11 +500,16 @@ def main():
 
     print("")
 
-    elapsed    = time.time() - t_start
+    # Restore any remaining converted files (safety net)
+    for path in converted:
+        restore_backup(path)
+
+    elapsed = time.time() - t_start
 
     print("\n[4/4] Computing metrics and saving report ...")
     pck, mean_err, std_err = compute_metrics(errors_by_joint)
-    report_text, report_path = save_report(pck, mean_err, std_err, len(samples), n_failed, elapsed)
+    report_text, report_path = save_report(
+        pck, mean_err, std_err, len(samples), n_failed, elapsed)
     csv_path = save_csv(csv_rows, csv_header)
 
     print("\n" + report_text)
